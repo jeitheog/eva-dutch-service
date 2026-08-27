@@ -1,0 +1,22 @@
+{
+  "name": "eva-dutch-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lingua — profesor de holandés (cerebro): motor SRS SM-2, tarjetas, memoria del alumno, errores y estadísticas. Fases 1+2 (infraestructura + SRS + recordatorios).",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.14",
+    "typescript": "^5.8.3"
+  }
+}
