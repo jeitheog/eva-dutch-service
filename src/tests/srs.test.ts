@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { openDb } from '../db'
-import { createCard, dueCards, dueStatus, getStats, reviewCard, sm2, streak, type Card, type SrsState } from '../services/srs'
+import { createCard, dueCards, dueStatus, getStats, listCards, reviewCard, sm2, streak, type Card, type SrsState } from '../services/srs'
 
 function freshDb() {
   return openDb(':memory:')
@@ -137,4 +137,74 @@ test('SRS: getStats resume todo (aciertos, por_categoria, dificiles)', () => {
   assert.equal(s.por_categoria['saludos'], 2)
   assert.equal(s.por_categoria['transporte'], 1)
   assert.equal(s.aciertos_pct, 100)
+})
+
+// ── Idioma: tarjetas en inglés ('en') junto a las de holandés ('nl') ───────
+
+test('INGLÉS: createCard con language en (default nl), dedupe POR idioma', () => {
+  const db = freshDb()
+  const nl = cardOf(createCard(db, { front: 'Good morning', back: 'Buenos días', language: 'nl' }))
+  assert.equal(nl.language, 'nl')
+  // El mismo front en 'en' NO choca con la tarjeta 'nl' (dedupe por idioma).
+  const en = cardOf(createCard(db, { front: 'Good morning', back: 'Buenos días', language: 'en' }))
+  assert.equal(en.language, 'en')
+  assert.notEqual(en.id, nl.id)
+  // Duplicado real dentro de 'en' → duplicate:true con existing_id.
+  const dup = createCard(db, { front: '  good morning ', back: 'Buenos días', language: 'en' })
+  assert.equal(dup.duplicate, true)
+  assert.equal(dup.existing_id, en.id)
+  // Sin language → 'nl' (no rompe el flujo actual).
+  assert.equal(cardOf(createCard(db, { front: 'Tot ziens', back: 'Hasta luego' })).language, 'nl')
+  // En tarjetas 'en' el campo nl queda VACÍO (el texto vive en front).
+  assert.equal(en.nl, '')
+})
+
+test('INGLÉS: /review/queue filtra por idioma — dueCards(language) solo del idioma', () => {
+  const db = freshDb()
+  const now = Date.UTC(2026, 8, 1, 10, 0, 0)
+  cardOf(createCard(db, { front: 'Goedemorgen', back: 'Buenos días', language: 'nl' }, now))
+  cardOf(createCard(db, { front: 'Good morning', back: 'Buenos días', language: 'en' }, now))
+  const enDue = dueCards(db, now, 10, 20, 'en')
+  assert.equal(enDue.length, 1)
+  assert.equal(enDue[0].language, 'en')
+  assert.equal(enDue[0].front, 'Good morning')
+  const nlDue = dueCards(db, now, 10, 20, 'nl')
+  assert.equal(nlDue.length, 1)
+  assert.equal(nlDue[0].language, 'nl')
+  // Default 'nl': sin language no aparece la tarjeta inglesa.
+  assert.equal(dueCards(db, now, 10).length, 1)
+  assert.equal(dueCards(db, now, 10)[0].front, 'Goedemorgen')
+})
+
+test('INGLÉS: /stats y /due/status filtran por idioma', () => {
+  const db = freshDb()
+  createCard(db, { front: 'Hallo', back: 'Hola', category: 'saludos', language: 'nl' })
+  const enA = cardOf(createCard(db, { front: 'Good morning', back: 'Buenos días', category: 'saludos', language: 'en' }))
+  cardOf(createCard(db, { front: 'Where is the station?', back: '¿Dónde está la estación?', category: 'viaje', language: 'en' }))
+  reviewCard(db, enA.id, 5, 0, Date.now())
+
+  const sEn = getStats(db, Date.now(), 'en')
+  assert.equal(sEn.total, 2)
+  assert.equal(sEn.por_categoria['saludos'], 1)
+  assert.equal(sEn.por_categoria['viaje'], 1)
+  assert.equal(sEn.por_categoria['general'], undefined, 'no mezcla categorías del otro idioma')
+
+  const sNl = getStats(db, Date.now(), 'nl')
+  assert.equal(sNl.total, 1)
+  assert.equal(sNl.por_categoria['saludos'], 1)
+
+  const dueEn = dueStatus(db, Date.now(), 20, 'en')
+  assert.equal(dueEn.pendientes_hoy, 1, 'la tarjeta en review no está pendiente (due mañana)')
+  const dueNl = dueStatus(db, Date.now(), 20, 'nl')
+  assert.equal(dueNl.pendientes_hoy, 1)
+})
+
+test('INGLÉS: listCards filtra por language', () => {
+  const db = freshDb()
+  createCard(db, { front: 'Goedemorgen', back: 'Buenos días', language: 'nl' })
+  createCard(db, { front: 'Good morning', back: 'Buenos días', language: 'en' })
+  assert.equal(listCards(db, { language: 'en' }).length, 1)
+  assert.equal(listCards(db, { language: 'en' })[0].front, 'Good morning')
+  assert.equal(listCards(db, { language: 'nl' }).length, 1)
+  assert.equal(listCards(db).length, 1, 'default nl')
 })

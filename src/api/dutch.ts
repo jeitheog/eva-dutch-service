@@ -6,12 +6,15 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { DatabaseSync } from 'node:sqlite'
+import { config } from '../config'
 import { audit, ensureStudentRow } from '../db'
 import { createCard, dueCards, dueStatus, getCard, getStats, listCards, reviewCard } from '../services/srs'
 import { createTranslator, fallbackTranslate } from '../services/llm'
 
 const cardSchema = z.object({
   type: z.enum(['phrase', 'word']).optional(),
+  /** Idioma objetivo: 'nl' (default) | 'en'. */
+  language: z.enum(['nl', 'en']).optional(),
   front: z.string().min(1),
   back: z.string().min(1),
   nl: z.string().optional(),
@@ -52,6 +55,8 @@ const errorSchema = z.object({
 const translateSchema = z.object({
   text: z.string().min(1),
   direction: z.enum(['es2nl', 'nl2es', 'auto']).optional(),
+  /** Idioma objetivo de la traducción: 'nl' (default) | 'en'. */
+  language: z.enum(['nl', 'en']).optional(),
   add_card: z.boolean().optional(),
   type: z.enum(['phrase', 'word']).optional(),
   category: z.string().optional(),
@@ -77,6 +82,7 @@ export function dutchRouter(db: DatabaseSync): Router {
     try {
       const result = createCard(db, {
         type: b.type,
+        language: b.language,
         front: b.front,
         back: b.back,
         nl: b.nl,
@@ -99,14 +105,16 @@ export function dutchRouter(db: DatabaseSync): Router {
   router.get('/cards', (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : undefined
     const category = typeof req.query.category === 'string' ? req.query.category : undefined
+    const language = typeof req.query.language === 'string' ? req.query.language : undefined
     const limit = Number(req.query.limit ?? 100)
-    res.json({ cards: listCards(db, { status, category, limit }) })
+    res.json({ cards: listCards(db, { status, category, language, limit }) })
   })
 
   // ── Repaso (SRS) ──────────────────────────────────────────────────────────
   router.get('/review/queue', (req, res) => {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 10)))
-    res.json({ cards: dueCards(db, Date.now(), limit) })
+    const language = req.query.language === 'en' ? 'en' : 'nl'
+    res.json({ cards: dueCards(db, Date.now(), limit, config.dailyNewLimit, language) })
   })
 
   router.post('/review', (req, res) => {
@@ -123,12 +131,14 @@ export function dutchRouter(db: DatabaseSync): Router {
   })
 
   // ── Stats / due ───────────────────────────────────────────────────────────
-  router.get('/stats', (_req, res) => {
-    res.json(getStats(db))
+  router.get('/stats', (req, res) => {
+    const language = req.query.language === 'en' ? 'en' : 'nl'
+    res.json(getStats(db, Date.now(), language))
   })
 
-  router.get('/due/status', (_req, res) => {
-    res.json(dueStatus(db))
+  router.get('/due/status', (req, res) => {
+    const language = req.query.language === 'en' ? 'en' : 'nl'
+    res.json(dueStatus(db, Date.now(), config.dailyNewLimit, language))
   })
 
   // ── Memoria del alumno ────────────────────────────────────────────────────
@@ -202,21 +212,24 @@ export function dutchRouter(db: DatabaseSync): Router {
       return res.status(400).json({ error: 'Datos inválidos', issues: parsed.error.issues })
     }
     const { text, direction, add_card, type, category } = parsed.data
+    const language = parsed.data.language ?? 'nl'
     let t
     try {
-      t = await translator.translate(text, direction ?? 'auto')
+      t = await translator.translate(text, direction ?? 'auto', language)
     } catch {
-      t = fallbackTranslate(text, direction)
+      t = fallbackTranslate(text, direction, language)
     }
     if (!add_card) return res.json(t)
 
-    const front = t.nl || text
+    // El front es el texto en el idioma objetivo: en para 'en', nl para 'nl'.
+    const front = t.en || t.nl || text
     const back = t.es || text
     const result = createCard(db, {
       type,
+      language,
       front,
       back,
-      nl: t.nl || text,
+      nl: t.nl || '',
       es: t.es || text,
       pronunciation: t.pronunciation,
       explanation: t.explanation,

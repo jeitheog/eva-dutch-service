@@ -36,7 +36,12 @@ const defaultLlmFetcher: LlmFetcher = async (url, init) => {
 }
 
 export interface TranslateResult {
+  /** Idioma objetivo de la traducción: 'nl' (holandés) | 'en' (inglés). */
+  language: 'nl' | 'en'
+  /** Texto en neerlandés (vacío si language='en'). */
   nl: string
+  /** Texto en inglés (vacío si language='nl'). */
+  en: string
   es: string
   pronunciation: string
   explanation: string
@@ -75,15 +80,40 @@ export function looksDutch(text: string): boolean {
   return markers.filter((m) => t.includes(m)).length >= 2
 }
 
-/** Fallback determinista: dirección explícita o heurística. */
-export function fallbackTranslate(text: string, direction?: string): TranslateResult {
+/** Detecta si el texto parece inglés (heurística simple). */
+export function looksEnglish(text: string): boolean {
+  const t = text.toLowerCase()
+  const markers = ['the ', ' i ', 'you', 'is ', 'are ', 'this ', 'to ', 'for ', 'and ', 'with ']
+  return markers.filter((m) => t.includes(m)).length >= 2
+}
+
+/**
+ * Fallback determinista: dirección explícita o heurística. Con
+ * language='en' devuelve el texto literal en el campo 'en' (marcado como
+ * no-LLM para que el usuario sepa revisarlo).
+ */
+export function fallbackTranslate(text: string, direction?: string, language: 'nl' | 'en' = 'nl'): TranslateResult {
   const clean = text.trim()
+  if (language === 'en') {
+    return {
+      language: 'en',
+      nl: '',
+      en: clean,
+      es: clean,
+      pronunciation: '',
+      explanation: 'Traducción literal (LLM no disponible — revisa esta tarjeta).',
+      examples: [],
+      used_llm: false,
+    }
+  }
   const dir = direction ?? (looksDutch(clean) ? 'nl2es' : 'es2nl')
   const dict = BASIC_DICT.find(([nl]) => clean.toLowerCase().includes(nl))
   if (dict) {
     const [nl, es] = dict
     return {
+      language: 'nl',
       nl,
+      en: '',
       es,
       pronunciation: '',
       explanation: 'Traducción del diccionario básico (LLM no disponible).',
@@ -93,7 +123,9 @@ export function fallbackTranslate(text: string, direction?: string): TranslateRe
   }
   if (dir === 'nl2es') {
     return {
+      language: 'nl',
       nl: clean,
+      en: '',
       es: clean,
       pronunciation: '',
       explanation: 'Traducción literal (LLM no disponible — revisa esta tarjeta).',
@@ -102,7 +134,9 @@ export function fallbackTranslate(text: string, direction?: string): TranslateRe
     }
   }
   return {
+    language: 'nl',
     nl: clean,
+    en: '',
     es: clean,
     pronunciation: '',
     explanation: 'Traducción literal (LLM no disponible — revisa esta tarjeta).',
@@ -140,17 +174,26 @@ export function createTranslator(opts: { fetcher?: LlmFetcher; baseUrl?: string;
   const fetcher = opts.fetcher ?? defaultLlmFetcher
 
   return {
-    async translate(text: string, direction?: string): Promise<TranslateResult> {
+    async translate(text: string, direction?: string, language: 'nl' | 'en' = 'nl'): Promise<TranslateResult> {
       const clean = text.trim()
       if (!clean) throw new Error('text vacío')
-      if (!apiKey) return fallbackTranslate(clean, direction)
-      const system = [
-        'Eres Lingua, un profesor de holandés para un hispanohablante.',
-        'Traduce el texto dado entre holandés (nl) y español (es).',
-        'Responde SOLO con JSON válido con estas claves:',
-        '{"nl": string, "es": string, "pronunciation": string (fonética aproximada en español), "explanation": string (explicación breve de la frase/palabra), "examples": [string] (2-3 frases de ejemplo en holandés con su traducción al español)}',
-        'Si el texto está en holandés, traduce a español y viceversa. La pronunciación va SIEMPRE en caracteres legibles para un hispanohablante.',
-      ].join(' ')
+      if (!apiKey) return fallbackTranslate(clean, direction, language)
+      const system =
+        language === 'en'
+          ? [
+              'Eres Lingua, un profesor de inglés para un hispanohablante.',
+              'Traduce el texto dado entre inglés (en) y español (es).',
+              'Responde SOLO con JSON válido con estas claves:',
+              '{"en": string, "es": string, "pronunciation": string (fonética aproximada en español), "explanation": string (explicación breve de la frase/palabra), "examples": [string] (2-3 frases de ejemplo en inglés con su traducción al español)}',
+              'Si el texto está en inglés, traduce a español y viceversa. La pronunciación va SIEMPRE en caracteres legibles para un hispanohablante.',
+            ].join(' ')
+          : [
+              'Eres Lingua, un profesor de holandés para un hispanohablante.',
+              'Traduce el texto dado entre holandés (nl) y español (es).',
+              'Responde SOLO con JSON válido con estas claves:',
+              '{"nl": string, "es": string, "pronunciation": string (fonética aproximada en español), "explanation": string (explicación breve de la frase/palabra), "examples": [string] (2-3 frases de ejemplo en holandés con su traducción al español)}',
+              'Si el texto está en holandés, traduce a español y viceversa. La pronunciación va SIEMPRE en caracteres legibles para un hispanohablante.',
+            ].join(' ')
       const user = `Dirección: ${direction ?? 'auto'}\nTexto: ${clean}`
       try {
         const res = await fetcher(`${baseUrl.replace(/\/+$/, '')}/v1/chat/completions`, {
@@ -177,9 +220,11 @@ export function createTranslator(opts: { fetcher?: LlmFetcher; baseUrl?: string;
         const content = data.choices?.[0]?.message?.content
         if (typeof content !== 'string' || !content.trim()) throw new LlmError('respuesta vacía')
         const parsed = extractJson(content)
-        if (!parsed) return fallbackTranslate(clean, direction)
+        if (!parsed) return fallbackTranslate(clean, direction, language)
         return {
-          nl: String(parsed.nl ?? clean),
+          language,
+          nl: language === 'en' ? '' : String(parsed.nl ?? clean),
+          en: language === 'en' ? String(parsed.en ?? parsed.nl ?? clean) : '',
           es: String(parsed.es ?? clean),
           pronunciation: String(parsed.pronunciation ?? ''),
           explanation: String(parsed.explanation ?? ''),

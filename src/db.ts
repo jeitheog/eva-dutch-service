@@ -12,6 +12,8 @@ import path from 'node:path'
 export interface Card {
   id: number
   type: 'phrase' | 'word'
+  /** Idioma objetivo de la tarjeta: 'nl' (holandés) | 'en' (inglés). */
+  language: 'nl' | 'en'
   front: string
   back: string
   nl: string
@@ -50,6 +52,7 @@ export function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS cards (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL DEFAULT 'phrase' CHECK (type IN ('phrase','word')),
+      language TEXT NOT NULL DEFAULT 'nl' CHECK (language IN ('nl','en')),
       front TEXT NOT NULL,
       back TEXT NOT NULL,
       nl TEXT NOT NULL DEFAULT '',
@@ -71,7 +74,17 @@ export function migrate(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_cards_due ON cards (due_at);
     CREATE INDEX IF NOT EXISTS idx_cards_status ON cards (status);
+  `)
 
+  // Migración: tarjetas existentes (sin columna) → language 'nl'. El índice
+  // de language se crea DESPUÉS del ALTER (sobre la columna ya existente).
+  const cardCols = db.prepare('PRAGMA table_info(cards)').all() as { name: string }[]
+  if (!cardCols.some((c) => c.name === 'language')) {
+    db.exec(`ALTER TABLE cards ADD COLUMN language TEXT NOT NULL DEFAULT 'nl'`)
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_cards_language ON cards (language)')
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS reviews_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,

@@ -82,6 +82,8 @@ export function getCard(db: DatabaseSync, cardId: number): Card | undefined {
 
 export interface CreateCardInput {
   type?: 'phrase' | 'word'
+  /** Idioma objetivo: 'nl' (holandés) | 'en' (inglés). Default 'nl'. */
+  language?: 'nl' | 'en'
   front: string
   back: string
   nl?: string
@@ -96,9 +98,10 @@ export interface CreateCardInput {
 }
 
 /**
- * Crea una tarjeta SIN duplicados: si el front o el nl ya existen
- * (comparación sin mayúsculas ni espacios sobrantes) devuelve
- * { duplicate: true, existing_id }.
+ * Crea una tarjeta SIN duplicados: si el front o el nl ya existen en ESE
+ * idioma (comparación sin mayúsculas ni espacios sobrantes) devuelve
+ * { duplicate: true, existing_id }. La deduplicación es por idioma: la
+ * misma cadena en 'nl' y en 'en' son tarjetas distintas.
  */
 export function createCard(
   db: DatabaseSync,
@@ -107,15 +110,17 @@ export function createCard(
 ): { duplicate: false; card: Card } | { duplicate: true; existing_id: number } {
   const front = input.front.trim()
   const nl = (input.nl ?? '').trim()
+  const language = input.language === 'en' ? 'en' : 'nl'
   if (!front) throw new Error('front es obligatorio')
 
   const existing = db
     .prepare(
       `SELECT id FROM cards
-       WHERE lower(trim(front)) = lower(trim(?))
-          OR (nl <> '' AND lower(trim(nl)) = lower(trim(?)))`
+       WHERE language = ?
+         AND (lower(trim(front)) = lower(trim(?))
+              OR (nl <> '' AND lower(trim(nl)) = lower(trim(?))))`
     )
-    .get(front, nl) as { id: number } | undefined
+    .get(language, front, nl) as { id: number } | undefined
   if (existing) return { duplicate: true, existing_id: existing.id }
 
   const examples = Array.isArray(input.examples)
@@ -126,16 +131,19 @@ export function createCard(
   const result = db
     .prepare(
       `INSERT INTO cards
-         (type, front, back, nl, es, pronunciation, explanation, grammar,
-          examples, context, category, source, created_at, due_at,
-          interval_days, ease, repetitions, lapses, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 2.5, 0, 0, 'new')`
+        (type, language, front, back, nl, es, pronunciation, explanation, grammar,
+         examples, context, category, source, created_at, due_at,
+         interval_days, ease, repetitions, lapses, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 2.5, 0, 0, 'new')`
     )
     .run(
       type,
+      language,
       front,
       input.back.trim(),
-      nl || front,
+      // Para 'en' el campo nl queda vacío (el texto vive en front); para 'nl'
+      // se mantiene el fallback histórico (nl nunca vacío).
+      language === 'en' ? (input.nl ?? '').trim() : nl || front,
       (input.es ?? '').trim(),
       (input.pronunciation ?? '').trim(),
       (input.explanation ?? '').trim(),
@@ -154,10 +162,10 @@ export function createCard(
 
 export function listCards(
   db: DatabaseSync,
-  opts: { status?: string; category?: string; limit?: number } = {}
+  opts: { status?: string; category?: string; language?: string; limit?: number } = {}
 ): Card[] {
-  const where: string[] = []
-  const params: Array<string | number> = []
+  const where: string[] = ['language = ?']
+  const params: Array<string | number> = [opts.language === 'en' ? 'en' : 'nl']
   if (opts.status) {
     where.push('status = ?')
     params.push(opts.status)
@@ -207,7 +215,8 @@ export function reviewCard(
 }
 
 /**
- * Tarjetas vencidas para una sesión, ordenadas por due_at ASC.
+ * Tarjetas vencidas para una sesión, ordenadas por due_at ASC, SOLO del
+ * idioma pedido (language: 'nl' | 'en', default 'nl').
  * Respeta el límite diario de tarjetas nuevas (~20/día): una vez agotado,
  * las tarjetas 'new' quedan fuera de la cola hasta mañana.
  */
@@ -215,7 +224,8 @@ export function dueCards(
   db: DatabaseSync,
   now: number,
   limit = 10,
-  dailyNewLimit = 20
+  dailyNewLimit = 20,
+  language: 'nl' | 'en' = 'nl'
 ): Card[] {
   const today = toDay(now)
   const stats = getDailyStats(db, today)
@@ -224,10 +234,10 @@ export function dueCards(
   const due = db
     .prepare(
       `SELECT * FROM cards
-       WHERE due_at <= ? AND status IN ('new','learning','review')
+       WHERE language = ? AND due_at <= ? AND status IN ('new','learning','review')
        ORDER BY due_at ASC, id ASC`
     )
-    .all(now) as unknown as Card[]
+    .all(language, now) as unknown as Card[]
   const out: Card[] = []
   let newTaken = 0
   for (const c of due) {
@@ -247,22 +257,22 @@ export interface DueStatus {
   dificiles: number
 }
 
-export function dueStatus(db: DatabaseSync, now = Date.now(), dailyNewLimit = 20): DueStatus {
+export function dueStatus(db: DatabaseSync, now = Date.now(), dailyNewLimit = 20, language: 'nl' | 'en' = 'nl'): DueStatus {
   const today = toDay(now)
   const stats = getDailyStats(db, today)
   const newUsed = stats?.new_cards ?? 0
   const pendientes = db
     .prepare(
       `SELECT COUNT(*) AS n FROM cards
-       WHERE due_at <= ? AND status IN ('new','learning','review')`
+       WHERE language = ? AND due_at <= ? AND status IN ('new','learning','review')`
     )
-    .get(endOfDay(now)) as { n: number }
+    .get(language, endOfDay(now)) as { n: number }
   const dificiles = db
     .prepare(
       `SELECT COUNT(*) AS n FROM cards
-       WHERE status IN ('learning','review') AND (lapses > 0 OR ease < 2)`
+       WHERE language = ? AND status IN ('learning','review') AND (lapses > 0 OR ease < 2)`
     )
-    .get() as { n: number }
+    .get(language) as { n: number }
   return {
     pendientes_hoy: pendientes.n,
     nuevas_disponibles: Math.max(0, dailyNewLimit - newUsed),
@@ -301,11 +311,11 @@ export interface StatsResult {
   por_categoria: Record<string, number>
 }
 
-export function getStats(db: DatabaseSync, now = Date.now()): StatsResult {
+export function getStats(db: DatabaseSync, now = Date.now(), language: 'nl' | 'en' = 'nl'): StatsResult {
   const byStatus = (status: string) =>
-    (db.prepare('SELECT COUNT(*) AS n FROM cards WHERE status = ?').get(status) as { n: number }).n
-  const dificiles = dueStatus(db, now).dificiles
-  const pendientes_hoy = dueStatus(db, now).pendientes_hoy
+    (db.prepare('SELECT COUNT(*) AS n FROM cards WHERE language = ? AND status = ?').get(language, status) as { n: number }).n
+  const dificiles = dueStatus(db, now, 20, language).dificiles
+  const pendientes_hoy = dueStatus(db, now, 20, language).pendientes_hoy
   const totals = db
     .prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN grade >= 3 THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN grade < 3 THEN 1 ELSE 0 END) AS ko FROM reviews_log')
     .get() as { n: number; ok: number | null; ko: number | null }
@@ -313,8 +323,8 @@ export function getStats(db: DatabaseSync, now = Date.now()): StatsResult {
   const ko = totals.ko ?? 0
   const aciertos_pct = ok + ko > 0 ? Math.round((ok / (ok + ko)) * 1000) / 10 : 0
   const byCat = db
-    .prepare('SELECT category, COUNT(*) AS n FROM cards GROUP BY category ORDER BY n DESC')
-    .all() as { category: string; n: number }[]
+    .prepare('SELECT category, COUNT(*) AS n FROM cards WHERE language = ? GROUP BY category ORDER BY n DESC')
+    .all(language) as { category: string; n: number }[]
   const por_categoria: Record<string, number> = {}
   for (const row of byCat) por_categoria[row.category] = row.n
   return {
